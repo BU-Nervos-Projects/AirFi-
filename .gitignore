@@ -1,9 +1,9 @@
-# Binaries
+# Binaries (root level only)
 bin/
-backend
-hostcli
-test_2party
-test_2wallet
+/backend
+/hostcli
+/test_2party
+/test_2wallet
 *.exe
 *.dll
 *.so
