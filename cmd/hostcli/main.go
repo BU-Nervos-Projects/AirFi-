@@ -387,7 +387,7 @@ func displayInitialDashboard() {
 
 func displayQRCode() {
 	fmt.Println("\nAirFi - Scan to Connect")
-	fmt.Println("-----------------------\n")
+	fmt.Println("-----------------------")
 
 	// Generate QR code with connection URL
 	connectURL := fmt.Sprintf("%s/connect", apiURL)
@@ -516,7 +516,7 @@ func watchSessions() {
 		cancel()
 	}()
 
-	fmt.Println("Watching sessions... (Press Ctrl+C to exit)\n")
+	fmt.Println("Watching sessions... (Press Ctrl+C to exit)")
 
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()

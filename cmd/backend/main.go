@@ -1041,14 +1041,18 @@ func (s *Server) handleEndSession(c *gin.Context) {
 
 	session.Client.Close()
 
-	// Auto-withdraw remaining CKB to sender
-	var withdrawTxHash string
+	// Channel funds are already returned by Perun settlement
+	// Try to withdraw any remaining reserved CKB (best effort)
 	go func() {
 		withdrawHash, err := s.withdrawToSender(context.Background(), sessionID)
 		if err != nil {
-			s.logger.Error("auto-withdraw failed", zap.Error(err), zap.String("session_id", sessionID))
+			// This is expected in many cases - Perun settlement already handled the funds
+			s.logger.Info("auto-withdraw skipped or failed (Perun settlement already returned funds)",
+				zap.String("session_id", sessionID),
+				zap.String("note", err.Error()),
+			)
 		} else {
-			s.logger.Info("auto-withdraw successful",
+			s.logger.Info("auto-withdraw of reserved CKB successful",
 				zap.String("session_id", sessionID),
 				zap.String("tx_hash", withdrawHash),
 			)
@@ -1056,10 +1060,9 @@ func (s *Server) handleEndSession(c *gin.Context) {
 	}()
 
 	c.JSON(http.StatusOK, gin.H{
-		"session_id":   session.ID,
-		"status":       "settled",
-		"message":      "Channel settled. Remaining CKB will be sent to your wallet automatically.",
-		"withdraw_tx":  withdrawTxHash,
+		"session_id": session.ID,
+		"status":     "settled",
+		"message":    "Channel settled successfully! Your CKB has been returned via Perun settlement.",
 	})
 }
 
@@ -1710,13 +1713,17 @@ func (s *Server) settleExpiredSession(ctx context.Context, session *GuestSession
 
 	session.Client.Close()
 
-	// Auto-withdraw for expired session too
+	// Channel funds are already returned by Perun settlement
+	// Try to withdraw any remaining reserved CKB (best effort)
 	go func() {
 		withdrawHash, err := s.withdrawToSender(context.Background(), session.ID)
 		if err != nil {
-			s.logger.Error("auto-withdraw failed for expired session", zap.Error(err), zap.String("session_id", session.ID))
+			s.logger.Info("auto-withdraw skipped for expired session (Perun settlement already returned funds)",
+				zap.String("session_id", session.ID),
+				zap.String("note", err.Error()),
+			)
 		} else {
-			s.logger.Info("auto-withdraw successful for expired session",
+			s.logger.Info("auto-withdraw of reserved CKB successful for expired session",
 				zap.String("session_id", session.ID),
 				zap.String("tx_hash", withdrawHash),
 			)

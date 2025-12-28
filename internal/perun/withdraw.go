@@ -143,13 +143,34 @@ func (w *Withdrawer) WithdrawAll(ctx context.Context, privateKey *secp256k1.Priv
 		return types.Hash{}, fmt.Errorf("no cells found in wallet")
 	}
 
+	w.logger.Info("found cells in wallet",
+		zap.Int("count", len(cells.Objects)),
+		zap.String("wallet_lock_hash", fromLockScript.Hash().Hex()),
+	)
+
 	// Calculate total capacity and build inputs
 	var totalCapacity uint64
 	inputs := make([]*types.CellInput, 0)
 
+	// Calculate expected lock script hash for verification
+	expectedLockHash := fromLockScript.Hash()
+
 	for _, cell := range cells.Objects {
 		// Only use cells without type scripts (pure CKB cells)
 		if cell.Output.Type != nil {
+			w.logger.Debug("skipping cell with type script",
+				zap.String("outpoint", fmt.Sprintf("%s:%d", cell.OutPoint.TxHash.Hex(), cell.OutPoint.Index)),
+			)
+			continue
+		}
+
+		// Verify cell actually belongs to this wallet (lock script matches)
+		if cell.Output.Lock.Hash() != expectedLockHash {
+			w.logger.Warn("skipping cell with different lock script",
+				zap.String("outpoint", fmt.Sprintf("%s:%d", cell.OutPoint.TxHash.Hex(), cell.OutPoint.Index)),
+				zap.String("expected_lock_hash", expectedLockHash.Hex()),
+				zap.String("actual_lock_hash", cell.Output.Lock.Hash().Hex()),
+			)
 			continue
 		}
 
@@ -158,10 +179,20 @@ func (w *Withdrawer) WithdrawAll(ctx context.Context, privateKey *secp256k1.Priv
 			Since:          0,
 			PreviousOutput: cell.OutPoint,
 		})
+
+		w.logger.Debug("adding cell to withdrawal",
+			zap.String("outpoint", fmt.Sprintf("%s:%d", cell.OutPoint.TxHash.Hex(), cell.OutPoint.Index)),
+			zap.Uint64("capacity", cell.Output.Capacity),
+		)
 	}
 
 	if len(inputs) == 0 {
-		return types.Hash{}, fmt.Errorf("no pure CKB cells found")
+		// Log what cells were found for debugging
+		w.logger.Warn("no withdrawable cells found - cells may have been consumed by Perun channel",
+			zap.Int("total_cells_found", len(cells.Objects)),
+			zap.String("expected_lock_hash", expectedLockHash.Hex()),
+		)
+		return types.Hash{}, fmt.Errorf("no withdrawable cells found (cells may have been consumed by Perun channel - use manual refund API)")
 	}
 
 	if totalCapacity <= WithdrawFee+MinCellCapacity {

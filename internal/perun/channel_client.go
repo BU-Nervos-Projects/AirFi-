@@ -3,15 +3,12 @@ package perun
 import (
 	"context"
 	"fmt"
-	"log"
 	"math/big"
 	"math/rand"
 	"sync"
 	"time"
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
-	ckbaddress "github.com/nervosnetwork/ckb-sdk-go/v2/address"
-	"github.com/nervosnetwork/ckb-sdk-go/v2/collector"
 	"github.com/nervosnetwork/ckb-sdk-go/v2/indexer"
 	"github.com/nervosnetwork/ckb-sdk-go/v2/rpc"
 	"github.com/nervosnetwork/ckb-sdk-go/v2/types"
@@ -234,9 +231,6 @@ func (cc *ChannelClient) ProposeChannel(
 		)
 	}
 
-	// DEBUG: Test the cell iterator directly
-	cc.testCellIterator(ctx, ckbAddress)
-
 	// Create allocation
 	ckbAsset := asset.NewCKBytesAsset()
 	initAlloc := gpchannel.NewAllocation(2, ckbAsset)
@@ -373,40 +367,3 @@ func (cc *ChannelClient) Close() error {
 	return cc.perunClient.Close()
 }
 
-// testCellIterator tests the CKB SDK's cell iterator directly to debug issues.
-func (cc *ChannelClient) testCellIterator(ctx context.Context, ckbAddress ckbaddress.Address) {
-	log.Println("DEBUG: Testing cell iterator directly...")
-
-	// Create search key like Perun does
-	searchKey := &indexer.SearchKey{
-		Script:           ckbAddress.Script,
-		ScriptType:       types.ScriptTypeLock,
-		ScriptSearchMode: types.ScriptSearchModeExact,
-		WithData:         true,
-	}
-
-	// Test 1: Direct GetCells call
-	log.Printf("DEBUG: SearchKey - CodeHash: %s, Args: 0x%x", ckbAddress.Script.CodeHash, ckbAddress.Script.Args)
-
-	cells, err := cc.rpcClient.GetCells(ctx, searchKey, indexer.SearchOrderAsc, 100, "")
-	if err != nil {
-		log.Printf("DEBUG: GetCells ERROR: %v", err)
-	} else {
-		log.Printf("DEBUG: GetCells returned %d cells", len(cells.Objects))
-		for i, cell := range cells.Objects {
-			log.Printf("DEBUG: Cell[%d]: capacity=%d, type=%v", i, cell.Output.Capacity, cell.Output.Type)
-		}
-	}
-
-	// Test 2: Using the SDK's iterator
-	iter := collector.NewLiveCellIterator(cc.rpcClient, searchKey)
-	cellCount := 0
-	for iter.HasNext() {
-		cell := iter.Next()
-		if cell != nil {
-			cellCount++
-			log.Printf("DEBUG: Iterator cell[%d]: outpoint=%s, capacity=%d", cellCount, cell.OutPoint.TxHash, cell.Output.Capacity)
-		}
-	}
-	log.Printf("DEBUG: Iterator found %d cells total", cellCount)
-}

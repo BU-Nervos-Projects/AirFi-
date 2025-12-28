@@ -213,8 +213,6 @@
                 const response = await fetch('/api/v1/sessions/' + sessionId);
                 const data = await response.json();
 
-                console.log('Session update:', data); // Debug log
-
                 if (response.ok) {
                     // Sync timer with server (only update if difference is significant)
                     const serverSeconds = parseTimeToSeconds(data.remaining_time);
