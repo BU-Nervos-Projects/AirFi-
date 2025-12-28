@@ -39,7 +39,8 @@ type GuestWallet struct {
 	CreatedAt     time.Time
 	FundedAt      *time.Time
 	SessionID     string // Associated session after funding
-	Status        string // created, funded, channel_open, settled
+	Status        string // created, funded, channel_open, settled, withdrawn
+	SenderAddress string // Original sender address for refund
 }
 
 // Open opens the SQLite database and creates tables if needed.
@@ -89,7 +90,8 @@ func createTables(conn *sql.DB) error {
 			created_at DATETIME,
 			funded_at DATETIME,
 			session_id TEXT,
-			status TEXT DEFAULT 'created'
+			status TEXT DEFAULT 'created',
+			sender_address TEXT DEFAULT ''
 		);
 
 		CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
@@ -241,23 +243,23 @@ func (db *DB) SettleSession(id string) error {
 // CreateGuestWallet inserts a new guest wallet.
 func (db *DB) CreateGuestWallet(w *GuestWallet) error {
 	_, err := db.conn.Exec(`
-		INSERT INTO guest_wallets (id, address, private_key_hex, funding_ckb, balance_ckb, created_at, funded_at, session_id, status)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, w.ID, w.Address, w.PrivateKeyHex, w.FundingCKB, w.BalanceCKB, w.CreatedAt, w.FundedAt, w.SessionID, w.Status)
+		INSERT INTO guest_wallets (id, address, private_key_hex, funding_ckb, balance_ckb, created_at, funded_at, session_id, status, sender_address)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, w.ID, w.Address, w.PrivateKeyHex, w.FundingCKB, w.BalanceCKB, w.CreatedAt, w.FundedAt, w.SessionID, w.Status, w.SenderAddress)
 	return err
 }
 
 // GetGuestWallet retrieves a guest wallet by ID.
 func (db *DB) GetGuestWallet(id string) (*GuestWallet, error) {
 	row := db.conn.QueryRow(`
-		SELECT id, address, private_key_hex, funding_ckb, balance_ckb, created_at, funded_at, session_id, status
+		SELECT id, address, private_key_hex, funding_ckb, balance_ckb, created_at, funded_at, session_id, status, sender_address
 		FROM guest_wallets WHERE id = ?
 	`, id)
 
 	w := &GuestWallet{}
 	var fundedAt sql.NullTime
-	var sessionID sql.NullString
-	err := row.Scan(&w.ID, &w.Address, &w.PrivateKeyHex, &w.FundingCKB, &w.BalanceCKB, &w.CreatedAt, &fundedAt, &sessionID, &w.Status)
+	var sessionID, senderAddr sql.NullString
+	err := row.Scan(&w.ID, &w.Address, &w.PrivateKeyHex, &w.FundingCKB, &w.BalanceCKB, &w.CreatedAt, &fundedAt, &sessionID, &w.Status, &senderAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -266,6 +268,9 @@ func (db *DB) GetGuestWallet(id string) (*GuestWallet, error) {
 	}
 	if sessionID.Valid {
 		w.SessionID = sessionID.String
+	}
+	if senderAddr.Valid {
+		w.SenderAddress = senderAddr.String
 	}
 	return w, nil
 }
@@ -273,14 +278,14 @@ func (db *DB) GetGuestWallet(id string) (*GuestWallet, error) {
 // GetGuestWalletByAddress retrieves a guest wallet by CKB address.
 func (db *DB) GetGuestWalletByAddress(address string) (*GuestWallet, error) {
 	row := db.conn.QueryRow(`
-		SELECT id, address, private_key_hex, funding_ckb, balance_ckb, created_at, funded_at, session_id, status
+		SELECT id, address, private_key_hex, funding_ckb, balance_ckb, created_at, funded_at, session_id, status, sender_address
 		FROM guest_wallets WHERE address = ?
 	`, address)
 
 	w := &GuestWallet{}
 	var fundedAt sql.NullTime
-	var sessionID sql.NullString
-	err := row.Scan(&w.ID, &w.Address, &w.PrivateKeyHex, &w.FundingCKB, &w.BalanceCKB, &w.CreatedAt, &fundedAt, &sessionID, &w.Status)
+	var sessionID, senderAddr sql.NullString
+	err := row.Scan(&w.ID, &w.Address, &w.PrivateKeyHex, &w.FundingCKB, &w.BalanceCKB, &w.CreatedAt, &fundedAt, &sessionID, &w.Status, &senderAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -290,13 +295,16 @@ func (db *DB) GetGuestWalletByAddress(address string) (*GuestWallet, error) {
 	if sessionID.Valid {
 		w.SessionID = sessionID.String
 	}
+	if senderAddr.Valid {
+		w.SenderAddress = senderAddr.String
+	}
 	return w, nil
 }
 
 // ListPendingWallets returns wallets waiting for funding.
 func (db *DB) ListPendingWallets() ([]*GuestWallet, error) {
 	rows, err := db.conn.Query(`
-		SELECT id, address, private_key_hex, funding_ckb, balance_ckb, created_at, funded_at, session_id, status
+		SELECT id, address, private_key_hex, funding_ckb, balance_ckb, created_at, funded_at, session_id, status, sender_address
 		FROM guest_wallets WHERE status = 'created' ORDER BY created_at ASC
 	`)
 	if err != nil {
@@ -308,8 +316,8 @@ func (db *DB) ListPendingWallets() ([]*GuestWallet, error) {
 	for rows.Next() {
 		w := &GuestWallet{}
 		var fundedAt sql.NullTime
-		var sessionID sql.NullString
-		if err := rows.Scan(&w.ID, &w.Address, &w.PrivateKeyHex, &w.FundingCKB, &w.BalanceCKB, &w.CreatedAt, &fundedAt, &sessionID, &w.Status); err != nil {
+		var sessionID, senderAddr sql.NullString
+		if err := rows.Scan(&w.ID, &w.Address, &w.PrivateKeyHex, &w.FundingCKB, &w.BalanceCKB, &w.CreatedAt, &fundedAt, &sessionID, &w.Status, &senderAddr); err != nil {
 			return nil, err
 		}
 		if fundedAt.Valid {
@@ -317,6 +325,9 @@ func (db *DB) ListPendingWallets() ([]*GuestWallet, error) {
 		}
 		if sessionID.Valid {
 			w.SessionID = sessionID.String
+		}
+		if senderAddr.Valid {
+			w.SenderAddress = senderAddr.String
 		}
 		wallets = append(wallets, w)
 	}
@@ -338,6 +349,38 @@ func (db *DB) UpdateWalletStatus(id, status string) error {
 	return err
 }
 
+// UpdateWalletSenderAddress updates the sender address for refund.
+func (db *DB) UpdateWalletSenderAddress(id, senderAddress string) error {
+	_, err := db.conn.Exec(`UPDATE guest_wallets SET sender_address = ? WHERE id = ?`, senderAddress, id)
+	return err
+}
+
+// GetWalletBySessionID retrieves a guest wallet by session ID.
+func (db *DB) GetWalletBySessionID(sessionID string) (*GuestWallet, error) {
+	row := db.conn.QueryRow(`
+		SELECT id, address, private_key_hex, funding_ckb, balance_ckb, created_at, funded_at, session_id, status, sender_address
+		FROM guest_wallets WHERE session_id = ?
+	`, sessionID)
+
+	w := &GuestWallet{}
+	var fundedAt sql.NullTime
+	var sessID, senderAddr sql.NullString
+	err := row.Scan(&w.ID, &w.Address, &w.PrivateKeyHex, &w.FundingCKB, &w.BalanceCKB, &w.CreatedAt, &fundedAt, &sessID, &w.Status, &senderAddr)
+	if err != nil {
+		return nil, err
+	}
+	if fundedAt.Valid {
+		w.FundedAt = &fundedAt.Time
+	}
+	if sessID.Valid {
+		w.SessionID = sessID.String
+	}
+	if senderAddr.Valid {
+		w.SenderAddress = senderAddr.String
+	}
+	return w, nil
+}
+
 // GetStats returns session statistics.
 func (db *DB) GetStats() (total int, active int, totalEarned int64, err error) {
 	row := db.conn.QueryRow(`SELECT COUNT(*) FROM sessions`)
@@ -353,6 +396,18 @@ func (db *DB) GetStats() (total int, active int, totalEarned int64, err error) {
 	row = db.conn.QueryRow(`SELECT COALESCE(SUM(spent_ckb), 0) FROM sessions`)
 	err = row.Scan(&totalEarned)
 	return
+}
+
+// ExtendSession extends the session expiry time and updates balances.
+func (db *DB) ExtendSession(id string, additionalMinutes int64, spentCKB int64) error {
+	_, err := db.conn.Exec(`
+		UPDATE sessions
+		SET expires_at = datetime(expires_at, '+' || ? || ' minutes'),
+		    spent_ckb = spent_ckb + ?,
+		    balance_ckb = balance_ckb - ?
+		WHERE id = ?
+	`, additionalMinutes, spentCKB, spentCKB, id)
+	return err
 }
 
 // CleanupExpired marks expired sessions.

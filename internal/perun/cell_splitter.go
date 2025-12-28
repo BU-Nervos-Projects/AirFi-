@@ -86,7 +86,8 @@ func (cs *CellSplitter) GetCells(ctx context.Context, lockScript *types.Script) 
 	return result, nil
 }
 
-// SplitCell splits a single cell into two cells.
+// SplitCell splits a cell into two cells.
+// It finds the largest cell that can be split and splits it.
 // Returns the transaction hash if successful.
 func (cs *CellSplitter) SplitCell(ctx context.Context, privateKey *secp256k1.PrivateKey, lockScript *types.Script) (types.Hash, error) {
 	cs.logger.Info("splitting cell for Perun channel preparation")
@@ -101,22 +102,34 @@ func (cs *CellSplitter) SplitCell(ctx context.Context, privateKey *secp256k1.Pri
 		return types.Hash{}, fmt.Errorf("no cells found")
 	}
 
-	if len(cells) >= 2 {
-		cs.logger.Info("wallet already has enough cells", zap.Int("count", len(cells)))
-		return types.Hash{}, nil // Already has multiple cells
+	// Find a cell that can be split (needs capacity for 2 cells + fee)
+	minSplitCapacity := 2*CellMinCapacity + SplitFee
+	var cellToSplit *indexer.LiveCell
+	for _, cell := range cells {
+		if cell.Output.Capacity >= minSplitCapacity {
+			if cellToSplit == nil || cell.Output.Capacity > cellToSplit.Output.Capacity {
+				cellToSplit = cell // Pick the largest splittable cell
+			}
+		}
 	}
 
-	// Get the single cell
-	cell := cells[0]
-	totalCapacity := cell.Output.Capacity
+	if cellToSplit == nil {
+		return types.Hash{}, fmt.Errorf("no cell with enough capacity to split: need at least %d shannons (%.2f CKB)",
+			minSplitCapacity, float64(minSplitCapacity)/100000000)
+	}
 
-	// Calculate split: cell1 gets 61 CKB (for channel token), cell2 gets the rest
-	cell1Capacity := CellMinCapacity
-	cell2Capacity := totalCapacity - cell1Capacity - SplitFee
+	totalCapacity := cellToSplit.Output.Capacity
 
-	if cell2Capacity < CellMinCapacity {
-		return types.Hash{}, fmt.Errorf("insufficient capacity to split: need at least %d shannons, have %d",
-			2*CellMinCapacity+SplitFee, totalCapacity)
+	// Calculate split: split evenly (50/50) for better balance
+	// This creates more balanced cells instead of many small + one large
+	availableCapacity := totalCapacity - SplitFee
+	cell1Capacity := availableCapacity / 2
+	cell2Capacity := availableCapacity - cell1Capacity
+
+	// Ensure both cells meet minimum capacity
+	if cell1Capacity < CellMinCapacity {
+		cell1Capacity = CellMinCapacity
+		cell2Capacity = availableCapacity - cell1Capacity
 	}
 
 	cs.logger.Info("splitting cell",
@@ -124,6 +137,7 @@ func (cs *CellSplitter) SplitCell(ctx context.Context, privateKey *secp256k1.Pri
 		zap.Uint64("cell1_capacity", cell1Capacity),
 		zap.Uint64("cell2_capacity", cell2Capacity),
 		zap.Uint64("fee", SplitFee),
+		zap.Int("current_cell_count", len(cells)),
 	)
 
 	// Get secp256k1 cell dep from blockchain
@@ -138,7 +152,7 @@ func (cs *CellSplitter) SplitCell(ctx context.Context, privateKey *secp256k1.Pri
 		Inputs: []*types.CellInput{
 			{
 				Since:          0,
-				PreviousOutput: cell.OutPoint,
+				PreviousOutput: cellToSplit.OutPoint,
 			},
 		},
 		Outputs: []*types.CellOutput{
@@ -285,14 +299,23 @@ func (cs *CellSplitter) waitForConfirmation(ctx context.Context, txHash types.Ha
 
 // EnsureMultipleCells ensures the wallet has at least 2 cells for Perun operations.
 func (cs *CellSplitter) EnsureMultipleCells(ctx context.Context, privateKey *secp256k1.PrivateKey, lockScript *types.Script) error {
+	return cs.EnsureMinimumCells(ctx, privateKey, lockScript, 2)
+}
+
+// EnsureMinimumCells ensures the wallet has at least minCells cells for Perun operations.
+// For channel operations, the host typically needs at least 3 cells:
+// - 1-2 cells for funding contribution
+// - 1 cell for change output
+func (cs *CellSplitter) EnsureMinimumCells(ctx context.Context, privateKey *secp256k1.PrivateKey, lockScript *types.Script, minCells int) error {
 	count, err := cs.CountCells(ctx, lockScript)
 	if err != nil {
 		return fmt.Errorf("failed to count cells: %w", err)
 	}
 
-	cs.logger.Info("cell count before split", zap.Int("count", count))
+	cs.logger.Info("cell count before preparation", zap.Int("count", count), zap.Int("minimum_required", minCells))
 
-	if count >= 2 {
+	if count >= minCells {
+		cs.logger.Info("wallet has enough cells", zap.Int("count", count))
 		return nil // Already have enough cells
 	}
 
@@ -300,23 +323,23 @@ func (cs *CellSplitter) EnsureMultipleCells(ctx context.Context, privateKey *sec
 		return fmt.Errorf("no cells found in wallet")
 	}
 
-	// Need to split
-	_, err = cs.SplitCell(ctx, privateKey, lockScript)
-	if err != nil {
-		return fmt.Errorf("failed to split cell: %w", err)
+	// Need to split cells until we have enough
+	for count < minCells {
+		cs.logger.Info("splitting cell to reach minimum", zap.Int("current", count), zap.Int("target", minCells))
+
+		_, err = cs.SplitCell(ctx, privateKey, lockScript)
+		if err != nil {
+			return fmt.Errorf("failed to split cell: %w", err)
+		}
+
+		// Re-count after split
+		count, err = cs.CountCells(ctx, lockScript)
+		if err != nil {
+			return fmt.Errorf("failed to count cells after split: %w", err)
+		}
+		cs.logger.Info("cell count after split", zap.Int("count", count))
 	}
 
-	// Verify split was successful
-	newCount, err := cs.CountCells(ctx, lockScript)
-	if err != nil {
-		return fmt.Errorf("failed to verify cell count after split: %w", err)
-	}
-
-	cs.logger.Info("cell count after split", zap.Int("count", newCount))
-
-	if newCount < 2 {
-		return fmt.Errorf("cell split did not produce enough cells: got %d", newCount)
-	}
-
+	cs.logger.Info("wallet cell preparation complete", zap.Int("final_count", count))
 	return nil
 }

@@ -173,6 +173,82 @@
             padding: 2rem;
             color: var(--text-muted);
         }
+        .token-btn {
+            padding: 0.25rem 0.5rem;
+            font-size: 0.75rem;
+            background: var(--accent-muted);
+            color: var(--accent);
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .token-btn:hover {
+            background: var(--accent);
+            color: var(--bg);
+        }
+        .token-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .token-modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.8);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+        .token-modal.active {
+            display: flex;
+        }
+        .token-content {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.5rem;
+            max-width: 600px;
+            width: 90%;
+        }
+        .token-content h3 {
+            margin-bottom: 1rem;
+        }
+        .token-box {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1rem;
+            font-family: monospace;
+            font-size: 0.75rem;
+            word-break: break-all;
+            max-height: 150px;
+            overflow-y: auto;
+            margin-bottom: 1rem;
+        }
+        .token-actions {
+            display: flex;
+            gap: 0.5rem;
+        }
+        .token-actions button {
+            flex: 1;
+            padding: 0.5rem;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.875rem;
+        }
+        .copy-token-btn {
+            background: var(--accent);
+            color: var(--bg);
+            border: none;
+        }
+        .close-modal-btn {
+            background: var(--bg-tertiary);
+            color: var(--text);
+            border: 1px solid var(--border);
+        }
         .logout-btn {
             padding: 0.5rem 1rem;
             font-size: 0.875rem;
@@ -232,11 +308,12 @@
                             <th>Spent</th>
                             <th>Remaining</th>
                             <th>Status</th>
+                            <th>Token</th>
                         </tr>
                     </thead>
                     <tbody id="sessions-body">
                         <tr>
-                            <td colspan="6" class="empty-state">No sessions yet</td>
+                            <td colspan="7" class="empty-state">No sessions yet</td>
                         </tr>
                     </tbody>
                 </table>
@@ -247,6 +324,19 @@
             <h3>Recent Events</h3>
             <div class="events-list" id="events-list">
                 <div class="empty-state">No events yet</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Token Modal -->
+    <div id="token-modal" class="token-modal" onclick="closeTokenModal(event)">
+        <div class="token-content" onclick="event.stopPropagation()">
+            <h3>JWT Access Token</h3>
+            <div id="token-info" style="font-size: 0.875rem; color: var(--text-secondary); margin-bottom: 0.5rem;"></div>
+            <div id="token-box" class="token-box"></div>
+            <div class="token-actions">
+                <button class="copy-token-btn" onclick="copyToken()">Copy Token</button>
+                <button class="close-modal-btn" onclick="closeTokenModal()">Close</button>
             </div>
         </div>
     </div>
@@ -308,7 +398,7 @@
                 // Update sessions table
                 const tbody = document.getElementById('sessions-body');
                 if (sessions.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No sessions yet</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No sessions yet</td></tr>';
                 } else {
                     tbody.innerHTML = sessions.map(s => `
                         <tr>
@@ -316,8 +406,13 @@
                             <td class="mono">${truncateAddress(s.guest_address, 15)}</td>
                             <td>${s.balance_ckb || 0} CKB</td>
                             <td>${s.spent_ckb || 0} CKB</td>
-                            <td>${s.balance_ckb || 0} min</td>
+                            <td>${s.remaining_time || '-'}</td>
                             <td class="${s.status === 'active' ? 'status-active' : 'status-ended'}">${s.status}</td>
+                            <td>
+                                ${s.status === 'active' ?
+                                    `<button class="token-btn" onclick="showToken('${s.session_id}')">Get Token</button>` :
+                                    '<span style="color: var(--text-muted);">-</span>'}
+                            </td>
                         </tr>
                     `).join('');
                 }
@@ -358,6 +453,55 @@
             if (!addr || addr.length <= len) return addr || '';
             const half = Math.floor((len - 3) / 2);
             return addr.slice(0, half) + '...' + addr.slice(-half);
+        }
+
+        let currentToken = '';
+
+        async function showToken(sessionId) {
+            const modal = document.getElementById('token-modal');
+            const tokenBox = document.getElementById('token-box');
+            const tokenInfo = document.getElementById('token-info');
+
+            tokenBox.textContent = 'Loading...';
+            tokenInfo.textContent = '';
+            modal.classList.add('active');
+
+            try {
+                const resp = await fetch('/api/v1/sessions/' + sessionId + '/token');
+                const data = await resp.json();
+
+                if (resp.ok) {
+                    currentToken = data.access_token;
+                    tokenBox.textContent = data.access_token;
+                    tokenInfo.innerHTML = `
+                        <strong>Session:</strong> ${data.session_id}<br>
+                        <strong>Channel:</strong> ${data.channel_id || '-'}<br>
+                        <strong>Expires:</strong> ${new Date(data.expires_at).toLocaleString()}
+                    `;
+                } else {
+                    tokenBox.textContent = 'Error: ' + (data.message || data.error);
+                    tokenInfo.textContent = data.status ? 'Status: ' + data.status : '';
+                    currentToken = '';
+                }
+            } catch (e) {
+                tokenBox.textContent = 'Error: ' + e.message;
+                currentToken = '';
+            }
+        }
+
+        function closeTokenModal(event) {
+            if (event && event.target !== event.currentTarget) return;
+            document.getElementById('token-modal').classList.remove('active');
+            currentToken = '';
+        }
+
+        function copyToken() {
+            if (!currentToken) return;
+            navigator.clipboard.writeText(currentToken).then(() => {
+                const btn = document.querySelector('.copy-token-btn');
+                btn.textContent = 'Copied!';
+                setTimeout(() => btn.textContent = 'Copy Token', 2000);
+            });
         }
 
         init();

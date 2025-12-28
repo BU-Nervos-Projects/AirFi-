@@ -141,8 +141,8 @@
                     <h2 class="title">Fund Your Session</h2>
                     <p class="subtitle">Send CKB to this address to start your WiFi session.</p>
 
-                    <div class="amount-display" id="required-amount">100 CKB</div>
-                    <p class="amount-label">Minimum funding (= 100 minutes WiFi)</p>
+                    <div class="amount-display" id="required-amount">2000 CKB</div>
+                    <p class="amount-label">Minimum funding (~500 minutes WiFi)</p>
 
                     <div id="qr-code" class="qr-container"></div>
 
@@ -153,7 +153,7 @@
                         <strong>How it works:</strong><br>
                         1. Send CKB from any wallet (JoyID, Neuron, etc.)<br>
                         2. We detect your payment automatically<br>
-                        3. WiFi activates instantly (1 CKB = 1 minute)
+                        3. WiFi activates instantly (2000 CKB = 1 hour)
                     </div>
 
                     <div class="status-indicator status-waiting" id="funding-status">
@@ -225,7 +225,7 @@
         let walletId = '';
         let walletAddress = '';
         let pollInterval = null;
-        const MIN_FUNDING = 150; // CKB minimum for Perun channel
+        const MIN_FUNDING = 2000; // CKB minimum for Perun channel (channel cell needs significant capacity)
 
         async function init() {
             try {

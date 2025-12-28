@@ -1,0 +1,38 @@
+# Git
+.git
+.gitignore
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+
+# Documentation
+*.md
+!README.md
+
+# Build artifacts
+*.exe
+backend
+hostcli
+genkey
+
+# Database files
+*.db
+*.db-journal
+
+# Keys (should be mounted or generated)
+keys/
+
+# Test directories
+cmd/test_*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Docker
+Dockerfile
+docker-compose*.yml
+.dockerignore

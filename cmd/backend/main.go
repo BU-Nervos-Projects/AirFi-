@@ -109,10 +109,38 @@ func main() {
 	// Check host balance
 	ctx := context.Background()
 	balance, _ := hostClient.GetBalance(ctx)
-	fmt.Printf("  Host Balance: %.2f CKB\n", float64(balance.Int64())/100000000)
+	hostBalanceCKB := float64(balance.Int64()) / 100000000
+	fmt.Printf("  Host Balance: %.2f CKB\n", hostBalanceCKB)
+
+	// Warn if host balance is too low for channel operations
+	// Host needs: 100 CKB funding + 61 CKB minimum cell + fees ≈ 200 CKB minimum
+	if hostBalanceCKB < 200 {
+		fmt.Printf("  WARNING: Host balance (%.2f CKB) may be too low for channel operations!\n", hostBalanceCKB)
+		fmt.Println("           Recommended minimum: 200 CKB")
+		fmt.Println("           Please fund the host wallet from: https://faucet.nervos.org")
+	}
+
+	// Ensure host wallet has multiple cells for Perun channel operations
+	// This is critical: Perun needs multiple cells for funding transactions
+	// Host needs at least 3 cells: 1-2 for funding, 1 for change output
+	fmt.Println("  Preparing Host wallet cells for Perun...")
+	hostLockScript, err := guest.DecodeAddress(hostClient.GetAddress())
+	if err != nil {
+		logger.Fatal("failed to decode host address", zap.Error(err))
+	}
+	hostCellSplitter := perun.NewCellSplitter(ckbClient, logger.Named("host-cell-splitter"))
+	if err := hostCellSplitter.EnsureMinimumCells(ctx, hostPrivKey, hostLockScript, 3); err != nil {
+		logger.Fatal("failed to prepare host wallet cells", zap.Error(err))
+	}
+	hostCellCount, _ := hostCellSplitter.CountCells(ctx, hostLockScript)
+	fmt.Printf("  Host wallet cells ready (count: %d)\n", hostCellCount)
 
 	// Initialize JWT service
-	keyPair, err := auth.LoadOrGenerateKeyPair("./keys/private.pem", "./keys/public.pem")
+	keysDir := os.Getenv("KEYS_DIR")
+	if keysDir == "" {
+		keysDir = "./keys"
+	}
+	keyPair, err := auth.LoadOrGenerateKeyPair(keysDir+"/private.pem", keysDir+"/public.pem")
 	if err != nil {
 		logger.Fatal("failed to initialize JWT keys", zap.Error(err))
 	}
@@ -126,12 +154,16 @@ func main() {
 	}
 
 	// Initialize SQLite database
-	database, err := db.Open("./airfi.db")
+	dbPath := os.Getenv("DB_PATH")
+	if dbPath == "" {
+		dbPath = "./airfi.db"
+	}
+	database, err := db.Open(dbPath)
 	if err != nil {
 		logger.Fatal("failed to open database", zap.Error(err))
 	}
 	defer database.Close()
-	fmt.Println("  Database: SQLite initialized (./airfi.db)")
+	fmt.Printf("  Database: SQLite initialized (%s)\n", dbPath)
 
 	// Create wallet manager for guest wallets
 	walletMgr := guest.NewWalletManager(types.NetworkTest)
@@ -148,7 +180,7 @@ func main() {
 		walletManager:     walletMgr,
 		sessions:          make(map[string]*GuestSession),
 		logger:            logger,
-		ratePerMin:        big.NewInt(100000000), // 1 CKB per minute
+		ratePerMin:        big.NewInt(833333333), // ~8.33 CKB per minute (500 CKB = 1 hour)
 		dashboardPassword: dashboardPassword,
 	}
 
@@ -188,6 +220,7 @@ func main() {
 		api.GET("/sessions/:sessionId", server.handleGetSession)
 		api.GET("/sessions/:sessionId/token", server.handleGetSessionToken)
 		api.POST("/sessions/:sessionId/end", server.handleEndSession)
+		api.POST("/sessions/:sessionId/extend", server.handleExtendSession)
 		api.POST("/auth/validate", server.handleValidateToken)
 	}
 
@@ -645,85 +678,104 @@ func (s *Server) handleExtendSession(c *gin.Context) {
 		return
 	}
 
+	// Parse amount (in CKB)
+	amountCKB, _ := new(big.Int).SetString(req.Amount, 10)
+	if amountCKB == nil || amountCKB.Sign() <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid amount"})
+		return
+	}
+
 	s.sessionsMu.Lock()
 	session, exists := s.sessions[sessionID]
 	if !exists {
 		s.sessionsMu.Unlock()
-		c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "session not found or channel not active"})
 		return
 	}
 
-	// Parse amount (in CKB)
-	amountCKB, _ := new(big.Int).SetString(req.Amount, 10)
-	if amountCKB == nil || amountCKB.Sign() <= 0 {
-		s.sessionsMu.Unlock()
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid amount"})
-		return
-	}
 	amountShannons := new(big.Int).Mul(amountCKB, big.NewInt(100000000))
 
-	// Send payment (off-chain)
+	// Send payment (off-chain) - this deducts from guest balance and adds to host
 	err := session.Client.SendPayment(session.Channel, amountShannons)
 	if err != nil {
 		s.sessionsMu.Unlock()
-		s.logger.Error("payment failed", zap.Error(err))
+		s.logger.Error("extend payment failed", zap.Error(err))
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	// Update session
+	// Update in-memory session
 	session.TotalPaid.Add(session.TotalPaid, amountShannons)
+	// Calculate additional minutes: amount in shannons / rate per minute
 	additionalMins := new(big.Int).Div(amountShannons, s.ratePerMin).Int64()
 	session.ExpiresAt = session.ExpiresAt.Add(time.Duration(additionalMins) * time.Minute)
 	s.sessionsMu.Unlock()
 
+	// Update database session
+	if err := s.db.ExtendSession(sessionID, additionalMins, amountCKB.Int64()); err != nil {
+		s.logger.Error("failed to update session in database", zap.Error(err))
+	}
+
 	remaining := time.Until(session.ExpiresAt)
 
+	s.logger.Info("session extended",
+		zap.String("session_id", sessionID),
+		zap.Int64("amount_ckb", amountCKB.Int64()),
+		zap.Int64("additional_minutes", additionalMins),
+		zap.Duration("remaining", remaining),
+	)
+
 	c.JSON(http.StatusOK, gin.H{
-		"session_id":     session.ID,
-		"total_paid":     fmt.Sprintf("%.2f", float64(session.TotalPaid.Int64())/100000000),
-		"remaining_time": formatDuration(remaining),
-		"status":         "active",
+		"session_id":         sessionID,
+		"amount_paid_ckb":    amountCKB.Int64(),
+		"additional_minutes": additionalMins,
+		"remaining_time":     formatDuration(remaining),
+		"status":             "active",
 	})
 }
 
 // handleGetSessionToken returns the JWT token for a session.
+// JWT is only generated after channel is successfully opened (status = "active").
 func (s *Server) handleGetSessionToken(c *gin.Context) {
 	sessionID := c.Param("sessionId")
 
 	// Check database for session
 	dbSession, err := s.db.GetSession(sessionID)
-	if err == nil {
-		// Check if session is expired
-		if time.Now().After(dbSession.ExpiresAt) {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "session expired"})
-			return
-		}
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
+		return
+	}
 
-		// Determine session type based on channel ID
-		sessionType := "perun"
-		if dbSession.ChannelID == "" {
-			sessionType = "pending"
-		}
+	// Check if session is expired
+	if time.Now().After(dbSession.ExpiresAt) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "session expired"})
+		return
+	}
 
-		// Generate fresh JWT token
-		remaining := time.Until(dbSession.ExpiresAt)
-		token, err := s.jwtService.GenerateToken(dbSession.ID, sessionType, remaining)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate token"})
-			return
-		}
-
-		c.JSON(http.StatusOK, gin.H{
-			"session_id":   dbSession.ID,
-			"access_token": token,
-			"expires_at":   dbSession.ExpiresAt.Format(time.RFC3339),
-			"channel_id":   dbSession.ChannelID,
+	// Only generate JWT after channel is open (status = "active")
+	if dbSession.Status != "active" {
+		c.JSON(http.StatusPreconditionFailed, gin.H{
+			"error":   "channel not ready",
+			"status":  dbSession.Status,
+			"message": "Please wait for channel to open before accessing WiFi",
 		})
 		return
 	}
 
-	c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
+	// Generate fresh JWT token
+	remaining := time.Until(dbSession.ExpiresAt)
+	token, err := s.jwtService.GenerateToken(dbSession.ID, "perun", remaining)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate token"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"session_id":   dbSession.ID,
+		"access_token": token,
+		"expires_at":   dbSession.ExpiresAt.Format(time.RFC3339),
+		"channel_id":   dbSession.ChannelID,
+	})
 }
 
 // handleValidateToken validates a JWT access token.
@@ -789,15 +841,35 @@ func (s *Server) handleEndSession(c *gin.Context) {
 	err := session.Client.SettleChannel(ctx, session.Channel)
 	if err != nil {
 		s.logger.Error("settlement failed", zap.Error(err))
-		// Still return success - the session is ended
+		// Still mark as settled in DB
+	} else {
+		s.logger.Info("channel settled successfully", zap.String("session_id", sessionID))
 	}
+
+	// Update database
+	s.db.SettleSession(sessionID)
 
 	session.Client.Close()
 
+	// Auto-withdraw remaining CKB to sender
+	var withdrawTxHash string
+	go func() {
+		withdrawHash, err := s.withdrawToSender(context.Background(), sessionID)
+		if err != nil {
+			s.logger.Error("auto-withdraw failed", zap.Error(err), zap.String("session_id", sessionID))
+		} else {
+			s.logger.Info("auto-withdraw successful",
+				zap.String("session_id", sessionID),
+				zap.String("tx_hash", withdrawHash),
+			)
+		}
+	}()
+
 	c.JSON(http.StatusOK, gin.H{
-		"session_id": session.ID,
-		"status":     "settled",
-		"message":    "Channel settled. Funds returned to your wallet.",
+		"session_id":   session.ID,
+		"status":       "settled",
+		"message":      "Channel settled. Remaining CKB will be sent to your wallet automatically.",
+		"withdraw_tx":  withdrawTxHash,
 	})
 }
 
@@ -810,6 +882,24 @@ type HostProposalHandler struct {
 func (h *HostProposalHandler) HandleProposal(proposal gpclient.ChannelProposal, responder *gpclient.ProposalResponder) {
 	h.logger.Info("received channel proposal")
 
+	// Debug: Check host cells before accepting
+	ctx := context.Background()
+	hostBalance, err := h.server.hostClient.GetBalance(ctx)
+	if err != nil {
+		h.logger.Warn("failed to check host balance", zap.Error(err))
+	} else {
+		h.logger.Info("host balance before funding",
+			zap.String("balance_shannons", hostBalance.String()),
+			zap.Float64("balance_ckb", float64(hostBalance.Int64())/100000000),
+		)
+	}
+
+	// Debug: Count host cells
+	hostLockScript, _ := guest.DecodeAddress(h.server.hostClient.GetAddress())
+	cellSplitter := perun.NewCellSplitter(h.server.ckbClient, h.logger)
+	cellCount, _ := cellSplitter.CountCells(ctx, hostLockScript)
+	h.logger.Info("host cell count before funding", zap.Int("count", cellCount))
+
 	ledgerProposal, ok := proposal.(*gpclient.LedgerChannelProposalMsg)
 	if !ok {
 		h.logger.Error("expected LedgerChannelProposalMsg")
@@ -818,7 +908,7 @@ func (h *HostProposalHandler) HandleProposal(proposal gpclient.ChannelProposal, 
 
 	accept := ledgerProposal.Accept(h.server.hostClient.GetAccount().Address(), gpclient.WithRandomNonce())
 
-	_, err := responder.Accept(context.Background(), accept)
+	_, err = responder.Accept(context.Background(), accept)
 	if err != nil {
 		h.logger.Error("failed to accept proposal", zap.Error(err))
 		return
@@ -998,7 +1088,7 @@ func (s *Server) createSessionFromWallet(wallet *db.GuestWallet, balanceCKB int6
 		BalanceCKB:   balanceCKB,
 		SpentCKB:     0,
 		CreatedAt:    now,
-		ExpiresAt:    now.Add(time.Duration(balanceCKB) * time.Minute), // 1 CKB = 1 minute
+		ExpiresAt:    now.Add(time.Duration(balanceCKB*100000000/833333333) * time.Minute), // ~8.33 CKB per minute
 		Status:       "active",
 	}
 
@@ -1047,6 +1137,20 @@ func (s *Server) checkPendingWallets(ctx context.Context) {
 
 		if balance >= 150*100000000 { // 150 CKB minimum for Perun channel
 			balanceCKB := balance / 100000000
+
+			// Detect sender address for later refund
+			withdrawer := perun.NewWithdrawer(s.ckbClient, s.logger.Named("withdrawer"))
+			senderAddr, err := withdrawer.GetSenderAddress(ctx, wallet.Address, types.NetworkTest)
+			if err != nil {
+				s.logger.Warn("failed to detect sender address", zap.Error(err))
+			} else {
+				s.logger.Info("detected sender address",
+					zap.String("wallet_id", wallet.ID),
+					zap.String("sender_address", senderAddr),
+				)
+				s.db.UpdateWalletSenderAddress(wallet.ID, senderAddr)
+			}
+
 			sessionID := s.createSessionFromWallet(wallet, balanceCKB)
 			if sessionID != "" {
 				s.db.UpdateWalletFunded(wallet.ID, balanceCKB, sessionID)
@@ -1093,17 +1197,21 @@ func (s *Server) openChannelForSession(ctx context.Context, wallet *db.GuestWall
 		return
 	}
 
-	// CRITICAL: Ensure wallet has multiple cells for Perun operations
-	// The Perun SDK's Start() function consumes cells from the iterator for the channel token,
-	// then needs MORE cells for transaction balancing. With a single cell, this fails.
-	s.logger.Info("ensuring wallet has multiple cells for Perun operation")
+	// CRITICAL: Ensure wallet has at least 4 cells for Perun operations
+	// The Perun SDK needs:
+	// - 1 cell for channel token
+	// - 1-2 cells for funding inputs
+	// - 1 cell for change (transaction balancing requires additional capacity)
+	// - 1 extra cell as buffer for final balancing
+	s.logger.Info("ensuring wallet has minimum cells for Perun operation")
 	cellSplitter := perun.NewCellSplitter(s.ckbClient, s.logger.Named("cell-splitter"))
-	if err := cellSplitter.EnsureMultipleCells(ctx, guestPrivKey, guestLockScript); err != nil {
+	if err := cellSplitter.EnsureMinimumCells(ctx, guestPrivKey, guestLockScript, 4); err != nil {
 		s.logger.Error("failed to prepare wallet cells", zap.Error(err))
 		s.db.UpdateSessionStatus(sessionID, "cell_preparation_failed")
 		return
 	}
-	s.logger.Info("wallet cell preparation complete")
+	guestCellCount, _ := cellSplitter.CountCells(ctx, guestLockScript)
+	s.logger.Info("wallet cell preparation complete", zap.Int("cell_count", guestCellCount))
 
 	// Create Guest channel client
 	guestClient, err := perun.NewChannelClient(&perun.ChannelClientConfig{
@@ -1145,12 +1253,31 @@ func (s *Server) openChannelForSession(ctx context.Context, wallet *db.GuestWall
 	}
 
 	// Guest funding in shannons
-	// Reserve 62 CKB for the cell that will be used as channel token (consumed by createOrGetChannelToken)
-	// Plus additional buffer for transaction fees
-	reservedCKB := int64(62)
+	// The Perun library requires:
+	// - 1 cell for channel token (61 CKB consumed but not counted in iterator balance)
+	// - Iterator must have enough cells for: funding + change cell capacity
+	// - Minimum change cell = 61 CKB
+	// - PFLS minimum capacity = 80 CKB
+	// Channel cell needs significant CKB for lock + type + state data storage
+	// Based on testing: need ~1500 CKB reserved for channel operations
+	// Minimum 2000 CKB total to have meaningful WiFi time after channel setup
+	const minBalanceForChannel = int64(2000)
+	if balanceCKB < minBalanceForChannel {
+		s.logger.Error("insufficient balance for channel - minimum 2000 CKB required",
+			zap.Int64("balance", balanceCKB),
+			zap.Int64("minimum_required", minBalanceForChannel),
+		)
+		s.db.UpdateSessionStatus(sessionID, "insufficient_funds")
+		guestClient.Close()
+		return
+	}
+
+	// Reserve for channel cell + token cell + change cell + buffer
+	// Testing showed 1500 CKB reserved works reliably
+	reservedCKB := int64(1500)
 	fundingCKB := balanceCKB - reservedCKB
-	if fundingCKB < 61 {
-		s.logger.Error("insufficient balance for channel after reserving for fees",
+	if fundingCKB < 42 { // PFLS minimum capacity is ~41 CKB (4100000032 shannons)
+		s.logger.Error("insufficient balance for channel after reserving for operations",
 			zap.Int64("balance", balanceCKB),
 			zap.Int64("reserved", reservedCKB),
 			zap.Int64("available_for_funding", fundingCKB),
@@ -1194,8 +1321,14 @@ func (s *Server) openChannelForSession(ctx context.Context, wallet *db.GuestWall
 	channelID := fmt.Sprintf("%x", channel.ID())
 
 	// Update session with channel info
-	s.db.UpdateSessionChannel(sessionID, channelID, "active")
-	s.db.UpdateWalletStatus(wallet.ID, "channel_open")
+	if err := s.db.UpdateSessionChannel(sessionID, channelID, "active"); err != nil {
+		s.logger.Error("failed to update session channel", zap.Error(err), zap.String("session_id", sessionID))
+	} else {
+		s.logger.Info("session status updated to active", zap.String("session_id", sessionID), zap.String("channel_id", channelID))
+	}
+	if err := s.db.UpdateWalletStatus(wallet.ID, "channel_open"); err != nil {
+		s.logger.Error("failed to update wallet status", zap.Error(err), zap.String("wallet_id", wallet.ID))
+	}
 
 	// Store in-memory for micropayment processing
 	guestSession := &GuestSession{
@@ -1311,5 +1444,62 @@ func (s *Server) settleExpiredSession(ctx context.Context, session *GuestSession
 	// Update database
 	s.db.SettleSession(session.ID)
 	session.Client.Close()
+
+	// Auto-withdraw for expired session too
+	go func() {
+		withdrawHash, err := s.withdrawToSender(context.Background(), session.ID)
+		if err != nil {
+			s.logger.Error("auto-withdraw failed for expired session", zap.Error(err), zap.String("session_id", session.ID))
+		} else {
+			s.logger.Info("auto-withdraw successful for expired session",
+				zap.String("session_id", session.ID),
+				zap.String("tx_hash", withdrawHash),
+			)
+		}
+	}()
+}
+
+// withdrawToSender withdraws remaining CKB from guest wallet to the original sender.
+func (s *Server) withdrawToSender(ctx context.Context, sessionID string) (string, error) {
+	// Get wallet by session ID
+	wallet, err := s.db.GetWalletBySessionID(sessionID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get wallet: %w", err)
+	}
+
+	if wallet.SenderAddress == "" {
+		return "", fmt.Errorf("no sender address found for wallet %s", wallet.ID)
+	}
+
+	// Load private key
+	guestKeyBytes, err := hex.DecodeString(wallet.PrivateKeyHex)
+	if err != nil {
+		return "", fmt.Errorf("failed to decode private key: %w", err)
+	}
+	guestPrivKey := secp256k1.PrivKeyFromBytes(guestKeyBytes)
+
+	// Get lock script for wallet
+	guestLockScript, err := guest.DecodeAddress(wallet.Address)
+	if err != nil {
+		return "", fmt.Errorf("failed to decode wallet address: %w", err)
+	}
+
+	// Wait a bit for settlement transaction to confirm
+	s.logger.Info("waiting for settlement to confirm before withdrawal...",
+		zap.String("session_id", sessionID),
+	)
+	time.Sleep(30 * time.Second)
+
+	// Withdraw all remaining CKB
+	withdrawer := perun.NewWithdrawer(s.ckbClient, s.logger.Named("withdrawer"))
+	txHash, err := withdrawer.WithdrawAll(ctx, guestPrivKey, guestLockScript, wallet.SenderAddress)
+	if err != nil {
+		return "", fmt.Errorf("failed to withdraw: %w", err)
+	}
+
+	// Update wallet status
+	s.db.UpdateWalletStatus(wallet.ID, "withdrawn")
+
+	return txHash.Hex(), nil
 }
 

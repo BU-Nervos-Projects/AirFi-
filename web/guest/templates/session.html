@@ -101,7 +101,7 @@
                 <div class="progress-bar">
                     <div class="progress-fill" id="progress-fill" style="width: 100%;"></div>
                 </div>
-                <div class="rate-info">1 CKB = 1 minute of WiFi access</div>
+                <div class="rate-info">~8 CKB = 1 minute (500 CKB = 1 hour)</div>
             </section>
 
             <!-- Channel Info -->
@@ -123,13 +123,41 @@
                 </div>
             </section>
 
+            <!-- Extend Session -->
+            <section class="card" id="extend-section">
+                <p class="section-label">Add More Time</p>
+                <p class="subtitle" style="margin-bottom: 1rem;">Pay more CKB from your channel balance to extend your session</p>
+                <div class="quick-actions">
+                    <button class="quick-btn" onclick="extendSession(85)">
+                        <span class="quick-btn-time">+10 min</span>
+                        <span class="quick-btn-price">85 CKB</span>
+                    </button>
+                    <button class="quick-btn" onclick="extendSession(250)">
+                        <span class="quick-btn-time">+30 min</span>
+                        <span class="quick-btn-price">250 CKB</span>
+                    </button>
+                    <button class="quick-btn" onclick="extendSession(500)">
+                        <span class="quick-btn-time">+1 hour</span>
+                        <span class="quick-btn-price">500 CKB</span>
+                    </button>
+                </div>
+                <div id="extend-status" class="hidden" style="margin-top: 1rem; text-align: center;"></div>
+            </section>
+
             <!-- End Session -->
             <section class="danger-card">
                 <h3 class="title">End Session</h3>
                 <p class="subtitle">Settle your channel and disconnect. Unused CKB will be returned to your wallet.</p>
-                <button class="btn btn-danger btn-block" onclick="endSession()">
-                    Disconnect & Settle
+                <button id="settle-btn" class="btn btn-danger btn-block" onclick="endSession()">
+                    <span id="settle-text">Disconnect & Settle</span>
+                    <span id="settle-loader" class="hidden" style="display: inline-flex; align-items: center; gap: 8px;">
+                        <div class="spinner" style="width: 16px; height: 16px; border-width: 2px; border-color: white; border-top-color: transparent;"></div>
+                        Settling on-chain...
+                    </span>
                 </button>
+                <p id="settle-note" class="hidden" style="font-size: 0.75rem; color: #737373; text-align: center; margin-top: 0.5rem;">
+                    This may take 1-2 minutes for blockchain confirmation
+                </p>
             </section>
         </main>
 
@@ -142,16 +170,19 @@
         const sessionId = '{{ .session.ID }}';
         let pollInterval;
         let isActive = true;
+        let lastStatus = '';
 
         function startPolling() {
             updateSession();
-            pollInterval = setInterval(updateSession, 3000);
+            pollInterval = setInterval(updateSession, 2000); // Poll every 2 seconds
         }
 
         async function updateSession() {
             try {
                 const response = await fetch('/api/v1/sessions/' + sessionId);
                 const data = await response.json();
+
+                console.log('Session update:', data); // Debug log
 
                 if (response.ok) {
                     // Update timer
@@ -162,28 +193,54 @@
                     document.getElementById('spent-ckb').textContent = data.spent_ckb;
                     document.getElementById('funding-ckb').textContent = data.funding_ckb;
 
-                    // Update progress bar
-                    const progress = (data.balance_ckb / data.funding_ckb) * 100;
-                    document.getElementById('progress-fill').style.width = progress + '%';
+                    // Update progress bar (use balance relative to funding)
+                    const progress = data.funding_ckb > 0 ? (data.balance_ckb / data.funding_ckb) * 100 : 0;
+                    document.getElementById('progress-fill').style.width = Math.max(0, Math.min(100, progress)) + '%';
 
                     // Update channel status
                     const channelStatus = document.getElementById('channel-status');
+                    const channelIdEl = document.getElementById('channel-id');
                     const channelId = data.channel_id || '';
+                    const status = data.status || '';
 
-                    if (channelId && channelId !== '' && channelId !== 'Pending') {
+                    // Check if channel is open (has valid channel_id and status is active)
+                    const isChannelOpen = channelId && channelId.length > 10 && status === 'active';
+
+                    if (isChannelOpen) {
                         channelStatus.className = 'channel-status channel-open';
                         channelStatus.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg><span>Payment channel active</span>';
-                        document.getElementById('channel-id').textContent = channelId;
+                        // Show truncated channel ID
+                        channelIdEl.textContent = channelId.length > 16 ? channelId.substring(0, 16) + '...' : channelId;
+                    } else if (status === 'channel_opening') {
+                        channelStatus.className = 'channel-status channel-pending';
+                        channelStatus.innerHTML = '<div class="spinner" style="width: 16px; height: 16px; border-width: 2px;"></div><span>Opening payment channel...</span>';
+                        channelIdEl.textContent = 'Pending';
+                    } else if (status === 'settled') {
+                        channelStatus.className = 'channel-status channel-open';
+                        channelStatus.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg><span>Channel settled</span>';
                     }
 
                     // Update status badge
                     const badge = document.getElementById('status-badge');
-                    document.getElementById('status-text').textContent = data.status;
+                    const statusText = document.getElementById('status-text');
+                    statusText.textContent = status;
 
-                    if (data.status !== 'active') {
+                    // Visual feedback on status change
+                    if (lastStatus !== status && lastStatus !== '') {
+                        badge.style.animation = 'pulse 0.5s';
+                        setTimeout(() => badge.style.animation = '', 500);
+                    }
+                    lastStatus = status;
+
+                    // Update badge color based on status
+                    if (status === 'active') {
+                        badge.className = 'status-badge active';
+                    } else if (status === 'channel_opening') {
+                        badge.className = 'status-badge pending';
+                    } else if (status === 'settled' || status === 'expired') {
+                        badge.className = 'status-badge inactive';
                         isActive = false;
                         clearInterval(pollInterval);
-                        badge.className = 'status-badge inactive';
                     }
                 }
             } catch (error) {
@@ -192,9 +249,20 @@
         }
 
         window.endSession = async function() {
-            if (!confirm('End your session? The channel will be settled and remaining CKB will be returned.')) {
+            if (!confirm('End your session? The channel will be settled and remaining CKB will be returned.\n\nThis may take 1-2 minutes for blockchain confirmation.')) {
                 return;
             }
+
+            // Show loader
+            const btn = document.getElementById('settle-btn');
+            const text = document.getElementById('settle-text');
+            const loader = document.getElementById('settle-loader');
+            const note = document.getElementById('settle-note');
+
+            btn.disabled = true;
+            text.classList.add('hidden');
+            loader.classList.remove('hidden');
+            note.classList.remove('hidden');
 
             try {
                 const response = await fetch('/api/v1/sessions/' + sessionId + '/end', {
@@ -206,7 +274,7 @@
                 if (response.ok) {
                     clearInterval(pollInterval);
                     isActive = false;
-                    alert('Session ended. Your channel has been settled.');
+                    alert('Session ended! Your channel has been settled.\n\nRemaining CKB will be returned to your wallet.');
                     window.location.href = '/';
                 } else {
                     throw new Error(data.error || 'Failed to end session');
@@ -214,6 +282,58 @@
             } catch (error) {
                 console.error('End session error:', error);
                 alert('Error: ' + error.message);
+
+                // Reset button
+                btn.disabled = false;
+                text.classList.remove('hidden');
+                loader.classList.add('hidden');
+                note.classList.add('hidden');
+            }
+        }
+
+        window.extendSession = async function(amount) {
+            if (!confirm(`Extend session by ${amount} minutes for ${amount} CKB?\n\nThis will be deducted from your channel balance.`)) {
+                return;
+            }
+
+            const statusEl = document.getElementById('extend-status');
+            const extendSection = document.getElementById('extend-section');
+            const buttons = extendSection.querySelectorAll('.quick-btn');
+
+            // Disable buttons
+            buttons.forEach(btn => btn.disabled = true);
+
+            // Show loading
+            statusEl.classList.remove('hidden');
+            statusEl.innerHTML = '<div style="display: inline-flex; align-items: center; gap: 8px;"><div class="spinner" style="width: 16px; height: 16px; border-width: 2px;"></div>Processing payment...</div>';
+            statusEl.style.color = '#737373';
+
+            try {
+                const response = await fetch('/api/v1/sessions/' + sessionId + '/extend', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ amount: String(amount) })
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    statusEl.innerHTML = `<span style="color: #10b981;">✓ Added ${data.additional_minutes} minutes!</span>`;
+                    // Update session immediately
+                    updateSession();
+                    // Hide status after 3 seconds
+                    setTimeout(() => {
+                        statusEl.classList.add('hidden');
+                    }, 3000);
+                } else {
+                    throw new Error(data.error || 'Failed to extend session');
+                }
+            } catch (error) {
+                console.error('Extend session error:', error);
+                statusEl.innerHTML = `<span style="color: #ef4444;">Error: ${error.message}</span>`;
+            } finally {
+                // Re-enable buttons
+                buttons.forEach(btn => btn.disabled = false);
             }
         }
 

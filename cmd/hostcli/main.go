@@ -45,6 +45,7 @@ func main() {
 		newSettleCommand(),
 		newStatusCommand(),
 		newWalletCommand(),
+		newTokenCommand(),
 	)
 
 	if err := rootCmd.Execute(); err != nil {
@@ -132,6 +133,19 @@ func newWalletCommand() *cobra.Command {
 		Long:  "Displays wallet address and balance",
 		Run: func(cmd *cobra.Command, args []string) {
 			showWallet()
+		},
+	}
+}
+
+// newTokenCommand creates the token command for getting JWT.
+func newTokenCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "token [session-id]",
+		Short: "Get JWT access token for a session",
+		Long:  "Retrieves the JWT access token for WiFi authentication. Only works for active sessions.",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			getSessionToken(args[0])
 		},
 	}
 }
@@ -690,4 +704,61 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen-3] + "..."
+}
+
+// TokenResponse represents the JWT token response from the API
+type TokenResponse struct {
+	SessionID   string `json:"session_id"`
+	AccessToken string `json:"access_token"`
+	ExpiresAt   string `json:"expires_at"`
+	ChannelID   string `json:"channel_id"`
+	Error       string `json:"error"`
+	Status      string `json:"status"`
+	Message     string `json:"message"`
+}
+
+func getSessionToken(sessionID string) {
+	fmt.Printf("\nGetting JWT token for session: %s\n", sessionID)
+	fmt.Println(strings.Repeat("-", 50))
+
+	resp, err := httpClient.Get(fmt.Sprintf("%s/api/v1/sessions/%s/token", apiURL, sessionID))
+	if err != nil {
+		fmt.Printf("Error: Failed to connect - %s\n", err.Error())
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Printf("Error: Failed to read response - %s\n", err.Error())
+		return
+	}
+
+	var result TokenResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		fmt.Printf("Error: Failed to parse response - %s\n", err.Error())
+		return
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		if result.Status != "" {
+			fmt.Printf("Status:  %s\n", result.Status)
+		}
+		if result.Message != "" {
+			fmt.Printf("Message: %s\n", result.Message)
+		} else if result.Error != "" {
+			fmt.Printf("Error:   %s\n", result.Error)
+		}
+		return
+	}
+
+	fmt.Printf("Session: %s\n", result.SessionID)
+	fmt.Printf("Channel: %s\n", result.ChannelID)
+	fmt.Printf("Expires: %s\n", result.ExpiresAt)
+	fmt.Println()
+	fmt.Println("JWT Access Token:")
+	fmt.Println(strings.Repeat("-", 50))
+	fmt.Println(result.AccessToken)
+	fmt.Println(strings.Repeat("-", 50))
+	fmt.Println("\nUse this token for WiFi authentication.")
 }
