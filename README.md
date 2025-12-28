@@ -408,4 +408,3 @@ MIT License
 - [Perun Network](https://perun.network)
 - [OpenNDS](https://github.com/openNDS/openNDS)
 - [OpenWrt](https://openwrt.org)
-- [Catalyst Labs](https://catalystlabs.id)
