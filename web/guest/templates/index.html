@@ -101,7 +101,7 @@
                         </svg>
                         <div class="feature-text">
                             <strong>2. Fund with CKB</strong><br>
-                            Send CKB from any wallet (2000 CKB = 1 hour)
+                            <span id="fund-text">Send CKB from any wallet</span>
                         </div>
                     </div>
                     <div class="feature-item">
@@ -121,22 +121,22 @@
             <!-- Pricing Info -->
             <section class="card">
                 <p class="section-label">Pricing</p>
-                <ul class="pricing-list">
+                <ul class="pricing-list" id="pricing-list">
                     <li class="pricing-item">
                         <span class="pricing-duration">1 hour</span>
-                        <span class="pricing-amount">2000 CKB (min)</span>
+                        <span class="pricing-amount" id="price-1hr">Loading...</span>
                     </li>
                     <li class="pricing-item">
                         <span class="pricing-duration">2 hours</span>
-                        <span class="pricing-amount">~2500 CKB</span>
+                        <span class="pricing-amount" id="price-2hr">Loading...</span>
                     </li>
                     <li class="pricing-item">
                         <span class="pricing-duration">3 hours</span>
-                        <span class="pricing-amount">~3000 CKB</span>
+                        <span class="pricing-amount" id="price-3hr">Loading...</span>
                     </li>
                 </ul>
-                <p style="font-size: 0.75rem; color: var(--text-muted); text-align: center; margin-top: 0.5rem;">
-                    ~1500 CKB for channel setup, ~500 CKB per hour
+                <p id="pricing-note" style="font-size: 0.75rem; color: var(--text-muted); text-align: center; margin-top: 0.5rem;">
+                    Loading pricing...
                 </p>
             </section>
 
@@ -150,5 +150,45 @@
 
         {{ end }}
     </div>
+
+    <script>
+        async function loadPricing() {
+            try {
+                const resp = await fetch('/api/v1/settings');
+                if (!resp.ok) throw new Error('Failed to fetch settings');
+
+                const data = await resp.json();
+                const ratePerHour = data.rate_per_hour || 500;
+                const channelSetupCKB = data.channel_setup_ckb || 500;
+                const minimumCKB = data.minimum_ckb || (channelSetupCKB + ratePerHour);
+
+                // Calculate prices (use API minimum for 1hr, then add rate)
+                const price1hr = minimumCKB;
+                const price2hr = minimumCKB + ratePerHour;
+                const price3hr = minimumCKB + (ratePerHour * 2);
+
+                // Update UI
+                document.getElementById('price-1hr').textContent = `${price1hr} CKB (min)`;
+                document.getElementById('price-2hr').textContent = `~${price2hr} CKB`;
+                document.getElementById('price-3hr').textContent = `~${price3hr} CKB`;
+                document.getElementById('pricing-note').textContent =
+                    `~${channelSetupCKB} CKB for channel setup, ~${ratePerHour} CKB per hour`;
+                document.getElementById('fund-text').textContent =
+                    `Send CKB from any wallet (${price1hr} CKB min)`;
+            } catch (e) {
+                console.error('Failed to load pricing:', e);
+                // Fallback to defaults
+                document.getElementById('price-1hr').textContent = '650 CKB (min)';
+                document.getElementById('price-2hr').textContent = '~750 CKB';
+                document.getElementById('price-3hr').textContent = '~850 CKB';
+                document.getElementById('pricing-note').textContent =
+                    '~500 CKB for channel setup, ~100 CKB per hour';
+                document.getElementById('fund-text').textContent =
+                    'Send CKB from any wallet (650 CKB min)';
+            }
+        }
+
+        loadPricing();
+    </script>
 </body>
 </html>

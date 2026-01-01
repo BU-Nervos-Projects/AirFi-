@@ -43,6 +43,13 @@
         .copy-btn:hover {
             background: #e5e5e5;
         }
+        .funding-status {
+            margin-top: 1rem;
+            padding: 0.75rem;
+            border-radius: 6px;
+            font-size: 0.875rem;
+            text-align: center;
+        }
         .status-indicator {
             display: flex;
             align-items: center;
@@ -141,19 +148,21 @@
                     <h2 class="title">Fund Your Session</h2>
                     <p class="subtitle">Send CKB to this address to start your WiFi session.</p>
 
-                    <div class="amount-display" id="required-amount">2000 CKB</div>
-                    <p class="amount-label">Minimum funding (~1 hour WiFi)</p>
+                    <div class="amount-display" id="required-amount">Loading...</div>
+                    <p class="amount-label" id="amount-label">Minimum funding</p>
 
                     <div id="qr-code" class="qr-container"></div>
 
                     <div class="funding-address" id="wallet-address">Loading...</div>
                     <button class="copy-btn" onclick="copyAddress()">Copy Address</button>
 
-                    <div class="info-box">
+                    <div id="funding-status" class="funding-status"></div>
+
+                    <div class="info-box" id="info-box">
                         <strong>How it works:</strong><br>
                         1. Send CKB from any wallet (JoyID, Neuron, etc.)<br>
                         2. We detect your payment automatically<br>
-                        3. WiFi activates instantly (2000 CKB = 1 hour)
+                        3. WiFi activates instantly
                     </div>
 
                     <div class="status-indicator status-waiting" id="funding-status">
@@ -222,14 +231,39 @@
         let walletId = '';
         let walletAddress = '';
         let pollInterval = null;
-        const MIN_FUNDING = 2000; // CKB minimum for Perun channel (channel cell needs significant capacity)
+        let ratePerHour = 500; // Default, will be fetched from API
+        let channelSetupCKB = 500; // Default, will be fetched from API
 
         // MAC and IP from MikroTik captive portal redirect
         const macAddress = '{{ .macAddress }}';
         const ipAddress = '{{ .ipAddress }}';
 
+        let minimumCKB = 650; // Default, will be fetched from API
+
+        async function fetchRate() {
+            try {
+                const resp = await fetch('/api/v1/settings');
+                if (resp.ok) {
+                    const data = await resp.json();
+                    ratePerHour = data.rate_per_hour || 500;
+                    channelSetupCKB = data.channel_setup_ckb || 500;
+                    minimumCKB = data.minimum_ckb || (channelSetupCKB + ratePerHour);
+                }
+            } catch (e) {
+                console.warn('Failed to fetch settings, using defaults:', e);
+            }
+        }
+
+        function getMinimumFunding() {
+            return minimumCKB;
+        }
+
         async function init() {
             try {
+                // Fetch rate first
+                await fetchRate();
+                const minFunding = getMinimumFunding();
+
                 // Request a new guest wallet from backend with MAC/IP info
                 const resp = await fetch('/api/v1/wallet/guest', {
                     method: 'POST',
@@ -254,7 +288,8 @@
 
                 // Display address
                 document.getElementById('wallet-address').textContent = walletAddress;
-                document.getElementById('required-amount').textContent = `${MIN_FUNDING}+ CKB`;
+                document.getElementById('required-amount').textContent = `${minFunding}+ CKB`;
+                document.getElementById('amount-label').textContent = `Minimum (~1 hour at ${ratePerHour} CKB/hr)`;
 
                 // Generate QR code with the address
                 new QRCode(document.getElementById('qr-code'), {
@@ -302,6 +337,14 @@
                     } else {
                         // Continue polling for session
                         pollInterval = setInterval(() => checkSession(), 2000);
+                    }
+                } else if (data.status === 'created' && data.balance_ckb > 0) {
+                    // Partial funding detected - show message
+                    const minCKB = data.minimum_ckb || getMinimumFunding();
+                    const needed = minCKB - data.balance_ckb;
+                    const statusEl = document.getElementById('funding-status');
+                    if (statusEl) {
+                        statusEl.innerHTML = `<span style="color: #f59e0b;">⚠️ Received ${data.balance_ckb} CKB - need ${needed} more CKB (minimum: ${minCKB} CKB)</span>`;
                     }
                 }
             } catch (e) {

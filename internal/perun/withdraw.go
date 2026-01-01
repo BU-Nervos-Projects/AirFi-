@@ -256,6 +256,7 @@ func (w *Withdrawer) WithdrawAll(ctx context.Context, privateKey *secp256k1.Priv
 }
 
 // signTransaction signs a transaction with the given private key.
+// For multiple inputs in the same lock group, the signature message must include ALL witnesses.
 func (w *Withdrawer) signTransaction(tx *types.Transaction, privateKey *secp256k1.PrivateKey) (*types.Transaction, error) {
 	// Create empty witness for placeholder
 	witnessArgs := &types.WitnessArgs{
@@ -269,12 +270,18 @@ func (w *Withdrawer) signTransaction(tx *types.Transaction, privateKey *secp256k
 	// Calculate transaction hash
 	txHash := tx.ComputeHash()
 
-	// Calculate message to sign (tx_hash + witness length + witness)
-	witnessLen := len(witnessBytes)
-	message := make([]byte, 32+8+witnessLen)
+	// Calculate message to sign: tx_hash + len(witness0) + witness0 + len(witness1) + witness1 + ...
+	// For multiple inputs in the same lock group, ALL witnesses must be included
+	message := make([]byte, 32)
 	copy(message[:32], txHash[:])
-	binary.LittleEndian.PutUint64(message[32:40], uint64(witnessLen))
-	copy(message[40:], witnessBytes)
+
+	// Add all witnesses to the message
+	for _, witness := range tx.Witnesses {
+		lenBytes := make([]byte, 8)
+		binary.LittleEndian.PutUint64(lenBytes, uint64(len(witness)))
+		message = append(message, lenBytes...)
+		message = append(message, witness...)
+	}
 
 	// Hash the message using blake2b
 	messageHash := blake2b.Blake256(message)

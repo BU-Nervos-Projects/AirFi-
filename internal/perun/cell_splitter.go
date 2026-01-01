@@ -302,6 +302,133 @@ func (cs *CellSplitter) EnsureMultipleCells(ctx context.Context, privateKey *sec
 	return cs.EnsureMinimumCells(ctx, privateKey, lockScript, 2)
 }
 
+// TransferCellsToGuest transfers multiple small cells from host to guest wallet.
+// This allows the host to subsidize the guest's cell preparation costs.
+// Returns the transaction hash and total CKB transferred.
+func (cs *CellSplitter) TransferCellsToGuest(
+	ctx context.Context,
+	hostPrivateKey *secp256k1.PrivateKey,
+	hostLockScript *types.Script,
+	guestLockScript *types.Script,
+	numCells int,
+) (types.Hash, uint64, error) {
+	cs.logger.Info("transferring cells from host to guest",
+		zap.Int("num_cells", numCells),
+	)
+
+	// Each cell needs minimum 61 CKB capacity
+	cellCapacity := CellMinCapacity
+	totalTransfer := uint64(numCells) * cellCapacity
+	totalWithFee := totalTransfer + SplitFee
+
+	// Get host cells
+	hostCells, err := cs.GetCells(ctx, hostLockScript)
+	if err != nil {
+		return types.Hash{}, 0, fmt.Errorf("failed to get host cells: %w", err)
+	}
+
+	if len(hostCells) == 0 {
+		return types.Hash{}, 0, fmt.Errorf("host has no cells")
+	}
+
+	// Find cells with enough capacity
+	var inputCells []*indexer.LiveCell
+	var inputCapacity uint64
+	for _, cell := range hostCells {
+		inputCells = append(inputCells, cell)
+		inputCapacity += cell.Output.Capacity
+		if inputCapacity >= totalWithFee+CellMinCapacity { // Need extra for change
+			break
+		}
+	}
+
+	if inputCapacity < totalWithFee+CellMinCapacity {
+		return types.Hash{}, 0, fmt.Errorf("insufficient host balance: have %d, need %d",
+			inputCapacity, totalWithFee+CellMinCapacity)
+	}
+
+	// Build outputs: numCells for guest + 1 change for host
+	outputs := make([]*types.CellOutput, numCells+1)
+	outputsData := make([][]byte, numCells+1)
+
+	// Guest cells
+	for i := 0; i < numCells; i++ {
+		outputs[i] = &types.CellOutput{
+			Capacity: cellCapacity,
+			Lock:     guestLockScript,
+			Type:     nil,
+		}
+		outputsData[i] = []byte{}
+	}
+
+	// Host change cell
+	changeCapacity := inputCapacity - totalTransfer - SplitFee
+	outputs[numCells] = &types.CellOutput{
+		Capacity: changeCapacity,
+		Lock:     hostLockScript,
+		Type:     nil,
+	}
+	outputsData[numCells] = []byte{}
+
+	// Build inputs
+	inputs := make([]*types.CellInput, len(inputCells))
+	for i, cell := range inputCells {
+		inputs[i] = &types.CellInput{
+			Since:          0,
+			PreviousOutput: cell.OutPoint,
+		}
+	}
+
+	// Build witnesses (one per input)
+	witnesses := make([][]byte, len(inputs))
+	for i := range witnesses {
+		witnesses[i] = make([]byte, 85) // Placeholder
+	}
+
+	// Get secp256k1 cell dep
+	secp256k1CellDep := getSecp256k1CellDep()
+
+	// Build transaction
+	tx := &types.Transaction{
+		Version:     0,
+		CellDeps:    []*types.CellDep{secp256k1CellDep},
+		Inputs:      inputs,
+		Outputs:     outputs,
+		OutputsData: outputsData,
+		Witnesses:   witnesses,
+	}
+
+	// Sign the transaction
+	signedTx, err := cs.signTransaction(tx, hostPrivateKey, hostLockScript)
+	if err != nil {
+		return types.Hash{}, 0, fmt.Errorf("failed to sign transaction: %w", err)
+	}
+
+	// Submit transaction
+	txHash, err := cs.rpcClient.SendTransaction(ctx, signedTx)
+	if err != nil {
+		return types.Hash{}, 0, fmt.Errorf("failed to send transaction: %w", err)
+	}
+
+	cs.logger.Info("cell transfer transaction submitted",
+		zap.String("tx_hash", txHash.Hex()),
+		zap.Int("cells_transferred", numCells),
+		zap.Uint64("total_ckb", totalTransfer/100000000),
+	)
+
+	// Wait for confirmation
+	if err := cs.waitForConfirmation(ctx, *txHash); err != nil {
+		return *txHash, totalTransfer, fmt.Errorf("transaction not confirmed: %w", err)
+	}
+
+	cs.logger.Info("cell transfer confirmed",
+		zap.String("tx_hash", txHash.Hex()),
+		zap.Uint64("total_ckb_transferred", totalTransfer/100000000),
+	)
+
+	return *txHash, totalTransfer, nil
+}
+
 // EnsureMinimumCells ensures the wallet has at least minCells cells for Perun operations.
 // For channel operations, the host typically needs at least 3 cells:
 // - 1-2 cells for funding contribution

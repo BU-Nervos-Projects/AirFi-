@@ -3,6 +3,7 @@ package db
 
 import (
 	"database/sql"
+	"fmt"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -46,6 +47,17 @@ type GuestWallet struct {
 	MACAddress    string // Guest device MAC address (from captive portal)
 	IPAddress     string // Guest device IP address (from captive portal)
 }
+
+// Settings represents configurable system settings.
+type Settings struct {
+	Key   string
+	Value string
+}
+
+// Default settings values
+const (
+	DefaultRatePerHour = 500 // 500 CKB per hour (in CKB, not shannons)
+)
 
 // Open opens the SQLite database and creates tables if needed.
 func Open(path string) (*DB, error) {
@@ -102,10 +114,23 @@ func createTables(conn *sql.DB) error {
 			ip_address TEXT DEFAULT ''
 		);
 
+		CREATE TABLE IF NOT EXISTS settings (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		);
+
 		CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
 		CREATE INDEX IF NOT EXISTS idx_sessions_created ON sessions(created_at);
 		CREATE INDEX IF NOT EXISTS idx_wallets_status ON guest_wallets(status);
 		CREATE INDEX IF NOT EXISTS idx_wallets_address ON guest_wallets(address);
+	`)
+	if err != nil {
+		return err
+	}
+
+	// Initialize default settings if not exist
+	_, err = conn.Exec(`
+		INSERT OR IGNORE INTO settings (key, value) VALUES ('rate_per_hour', '500')
 	`)
 	return err
 }
@@ -401,6 +426,12 @@ func (db *DB) UpdateWalletFunded(id string, balanceCKB int64, sessionID string) 
 	return err
 }
 
+// UpdateWalletBalance updates the wallet balance without changing status.
+func (db *DB) UpdateWalletBalance(id string, balanceCKB int64) error {
+	_, err := db.conn.Exec(`UPDATE guest_wallets SET balance_ckb = ? WHERE id = ?`, balanceCKB, id)
+	return err
+}
+
 // UpdateWalletStatus updates the wallet status.
 func (db *DB) UpdateWalletStatus(id, status string) error {
 	_, err := db.conn.Exec(`UPDATE guest_wallets SET status = ? WHERE id = ?`, status, id)
@@ -484,4 +515,59 @@ func (db *DB) CleanupExpired() (int64, error) {
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+// GetSetting retrieves a setting value by key.
+func (db *DB) GetSetting(key string) (string, error) {
+	row := db.conn.QueryRow(`SELECT value FROM settings WHERE key = ?`, key)
+	var value string
+	err := row.Scan(&value)
+	return value, err
+}
+
+// SetSetting sets a setting value.
+func (db *DB) SetSetting(key, value string) error {
+	_, err := db.conn.Exec(`
+		INSERT INTO settings (key, value) VALUES (?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value
+	`, key, value)
+	return err
+}
+
+// GetRatePerHour returns the configured rate per hour in CKB.
+func (db *DB) GetRatePerHour() (int64, error) {
+	value, err := db.GetSetting("rate_per_hour")
+	if err != nil {
+		return DefaultRatePerHour, nil // Return default if not found
+	}
+	var rate int64
+	_, err = fmt.Sscanf(value, "%d", &rate)
+	if err != nil {
+		return DefaultRatePerHour, nil
+	}
+	return rate, nil
+}
+
+// SetRatePerHour sets the rate per hour in CKB.
+func (db *DB) SetRatePerHour(rate int64) error {
+	return db.SetSetting("rate_per_hour", fmt.Sprintf("%d", rate))
+}
+
+// GetAllSettings returns all settings as a map.
+func (db *DB) GetAllSettings() (map[string]string, error) {
+	rows, err := db.conn.Query(`SELECT key, value FROM settings`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	settings := make(map[string]string)
+	for rows.Next() {
+		var key, value string
+		if err := rows.Scan(&key, &value); err != nil {
+			return nil, err
+		}
+		settings[key] = value
+	}
+	return settings, nil
 }

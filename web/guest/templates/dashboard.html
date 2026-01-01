@@ -263,6 +263,74 @@
         .logout-btn:hover {
             background: var(--border);
         }
+        .settings-card {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-top: 1.5rem;
+        }
+        .settings-card h3 {
+            margin-bottom: 1rem;
+            font-size: 1rem;
+        }
+        .settings-form {
+            display: flex;
+            gap: 1rem;
+            align-items: flex-end;
+        }
+        .setting-group {
+            flex: 1;
+        }
+        .setting-label {
+            display: block;
+            font-size: 0.875rem;
+            color: var(--text-muted);
+            margin-bottom: 0.5rem;
+        }
+        .setting-input {
+            width: 100%;
+            padding: 0.625rem 0.75rem;
+            font-size: 1rem;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            background: var(--bg);
+            color: var(--text);
+            box-sizing: border-box;
+        }
+        .setting-input:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+        .save-btn {
+            padding: 0.625rem 1.25rem;
+            font-size: 0.875rem;
+            background: var(--accent);
+            color: var(--bg);
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 500;
+            white-space: nowrap;
+            height: fit-content;
+        }
+        .save-btn:hover {
+            opacity: 0.9;
+        }
+        .save-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .save-status {
+            font-size: 0.875rem;
+            margin-left: 0.5rem;
+        }
+        .save-status.success {
+            color: var(--success);
+        }
+        .save-status.error {
+            color: #ff6b6b;
+        }
     </style>
 </head>
 <body>
@@ -329,6 +397,18 @@
                 <div class="empty-state">No events yet</div>
             </div>
         </div>
+
+        <div class="settings-card">
+            <h3>Settings</h3>
+            <div class="settings-form">
+                <div class="setting-group">
+                    <label class="setting-label" for="rate-per-hour">Rate per Hour (CKB)</label>
+                    <input type="number" id="rate-per-hour" class="setting-input" min="1" placeholder="500">
+                </div>
+                <button class="save-btn" onclick="saveSettings()">Save</button>
+                <span id="save-status" class="save-status"></span>
+            </div>
+        </div>
     </div>
 
     <!-- Token Modal -->
@@ -358,6 +438,9 @@
                 document.getElementById('wallet-address').textContent = 'Error loading';
             }
 
+            // Load settings
+            await loadSettings();
+
             // Generate QR for guest portal
             const portalUrl = window.location.origin;
             document.getElementById('portal-url').textContent = portalUrl;
@@ -373,6 +456,59 @@
             // Start polling
             updateDashboard();
             setInterval(updateDashboard, 3000);
+        }
+
+        async function loadSettings() {
+            try {
+                const resp = await fetch('/api/v1/settings');
+                if (resp.ok) {
+                    const data = await resp.json();
+                    document.getElementById('rate-per-hour').value = data.rate_per_hour || 500;
+                }
+            } catch (e) {
+                console.error('Failed to load settings:', e);
+            }
+        }
+
+        async function saveSettings() {
+            const rateInput = document.getElementById('rate-per-hour');
+            const saveBtn = document.querySelector('.save-btn');
+            const saveStatus = document.getElementById('save-status');
+
+            const rate = parseInt(rateInput.value);
+            if (!rate || rate < 1) {
+                saveStatus.textContent = 'Rate must be at least 1 CKB';
+                saveStatus.className = 'save-status error';
+                return;
+            }
+
+            saveBtn.disabled = true;
+            saveBtn.textContent = 'Saving...';
+            saveStatus.textContent = '';
+
+            try {
+                const resp = await fetch('/api/v1/settings/rate', {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ rate_per_hour: rate })
+                });
+
+                if (resp.ok) {
+                    saveStatus.textContent = 'Saved!';
+                    saveStatus.className = 'save-status success';
+                } else {
+                    const data = await resp.json();
+                    saveStatus.textContent = data.error || 'Failed to save';
+                    saveStatus.className = 'save-status error';
+                }
+            } catch (e) {
+                saveStatus.textContent = 'Error: ' + e.message;
+                saveStatus.className = 'save-status error';
+            } finally {
+                saveBtn.disabled = false;
+                saveBtn.textContent = 'Save Settings';
+                setTimeout(() => { saveStatus.textContent = ''; }, 3000);
+            }
         }
 
         async function updateDashboard() {

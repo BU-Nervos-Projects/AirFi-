@@ -10,7 +10,9 @@ AirFi enables pay-per-use WiFi access using CKB (Nervos Network) micropayments w
 - **Auto Wallet Generation**: Temporary CKB wallet for each guest session
 - **JWT Authentication**: Secure token-based WiFi access
 - **Real-time Dashboard**: Live session monitoring for hosts
-- **Auto-Refund**: Remaining CKB returned when session ends
+- **Configurable Pricing**: Set your own CKB per hour rate via dashboard
+- **Background Settlement**: Fast disconnect, settlement runs in background
+- **Auto-Refund**: Remaining CKB returned to sender when session ends
 
 ## Architecture
 
@@ -72,6 +74,9 @@ Remaining CKB refunded to guest
 go mod tidy
 go build -o backend ./cmd/backend
 go build -o hostcli ./cmd/hostcli
+
+# Or run directly without building:
+go run ./cmd/backend/
 ```
 
 ### 2. Configure OpenWrt Router
@@ -110,15 +115,21 @@ Backend starts on `http://localhost:8080`
 
 ## Pricing
 
+Pricing is **configurable** via the dashboard. Default rates:
+
 | Amount | Duration |
 |--------|----------|
-| 2000 CKB | ~1 hour |
-| 4000 CKB | ~2 hours |
-| 6000 CKB | ~3 hours |
+| 600 CKB | ~1 hour (minimum at 100 CKB/hr) |
+| 700 CKB | ~2 hours |
+| 800 CKB | ~3 hours |
 
-**Rate**: ~8.33 CKB per minute (500 CKB per hour usable after channel setup)
+**Channel Setup**: ~500 CKB (reserved for Perun channel)
 
-**Minimum**: 2000 CKB (includes ~1500 CKB for Perun channel setup)
+**Rate**: Configurable per hour (default: 500 CKB/hour)
+
+**Minimum**: Channel setup + 1 hour rate (e.g., 500 + 100 = 600 CKB at 100 CKB/hr)
+
+> Pricing is fetched dynamically from `/api/v1/settings` and displayed on the landing page.
 
 ## Configuration
 
@@ -177,6 +188,13 @@ export OPENWRT_PASSWORD=routerpass
 |----------|--------|-------------|
 | `POST /api/v1/auth/validate` | POST | Validate JWT token |
 
+### Settings
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `GET /api/v1/settings` | GET | Get current pricing settings (public) |
+| `POST /api/v1/settings` | POST | Update pricing settings (auth required) |
+
 ### System
 
 | Endpoint | Method | Description |
@@ -220,19 +238,27 @@ export OPENWRT_PASSWORD=routerpass
 ```
 airfi-perun-nervous/
 ├── cmd/
-│   ├── backend/          # Backend server
-│   └── hostcli/          # Host CLI tool
+│   ├── backend/              # Backend server
+│   │   ├── main.go           # Entry point
+│   │   ├── server.go         # Server struct & initialization
+│   │   ├── handlers.go       # Page handlers (HTML)
+│   │   ├── handlers_api.go   # API handlers (JSON)
+│   │   ├── session.go        # Session management & micropayments
+│   │   ├── wallet.go         # Wallet operations & funding detection
+│   │   ├── channel.go        # Perun channel operations
+│   │   └── utils.go          # Utility functions
+│   └── hostcli/              # Host CLI tool
 ├── internal/
-│   ├── auth/             # JWT authentication
-│   ├── db/               # SQLite database
-│   ├── guest/            # Guest wallet generation
-│   ├── perun/            # Perun channel integration
-│   └── router/           # WiFi router control (OpenWrt)
+│   ├── auth/                 # JWT authentication
+│   ├── db/                   # SQLite database
+│   ├── guest/                # Guest wallet generation
+│   ├── perun/                # Perun channel integration
+│   └── router/               # WiFi router control (OpenWrt)
 ├── web/guest/
-│   ├── static/           # CSS, JS assets
-│   └── templates/        # HTML templates
-├── keys/                 # JWT keys (auto-generated)
-└── airfi.db              # SQLite database (auto-created)
+│   ├── static/               # CSS, JS assets
+│   └── templates/            # HTML templates
+├── keys/                     # JWT keys (auto-generated)
+└── airfi.db                  # SQLite database (auto-created)
 ```
 
 ## Database Schema
@@ -280,17 +306,20 @@ CREATE TABLE guest_wallets (
 ## Session Status Flow
 
 ```
-created → funded → channel_opening → active → settled
+created → funded → channel_opening → active → settling → settled
                                         ↓
-                                     expired
+                                     expired → settling → settled
 ```
 
 - **created**: Wallet generated, waiting for CKB
 - **funded**: CKB received, opening channel
 - **channel_opening**: Perun channel being set up
 - **active**: WiFi access granted (MAC authorized)
-- **expired**: Time ran out, auto-settled
+- **expired**: Time ran out, auto-settling
+- **settling**: Channel settlement in progress (background)
 - **settled**: Channel closed, CKB refunded
+
+> Settlement runs in the background so users can disconnect quickly without waiting for blockchain confirmation.
 
 ## OpenWrt/OpenNDS Setup
 
