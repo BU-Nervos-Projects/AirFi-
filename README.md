@@ -1,6 +1,6 @@
 # AirFi - WiFi Access via Micropayments
 
-AirFi enables pay-per-use WiFi access using CKB (Nervos Network) micropayments with Perun state channels. Guests pay with cryptocurrency and get instant internet access controlled via OpenWrt/OpenNDS captive portal.
+AirFi enables pay-per-use WiFi access usingmicropayments with Perun state channels. Guests pay with cryptocurrency and get instant internet access controlled via OpenWrt/OpenNDS captive portal.
 
 ## Features
 
@@ -10,9 +10,9 @@ AirFi enables pay-per-use WiFi access using CKB (Nervos Network) micropayments w
 - **Auto Wallet Generation**: Temporary CKB wallet for each guest session
 - **JWT Authentication**: Secure token-based WiFi access
 - **Real-time Dashboard**: Live session monitoring for hosts
-- **Configurable Pricing**: Set your own CKB per hour rate via dashboard
+- **Configurable Pricing**: Set your own price per hour rate via dashboard
 - **Background Settlement**: Fast disconnect, settlement runs in background
-- **Auto-Refund**: Remaining CKB returned to sender when session ends
+- **Auto-Refund**: Remaining amount returned to sender when session ends
 
 ## Architecture
 
